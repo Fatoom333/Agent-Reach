@@ -6,6 +6,53 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [1.6.0] - 2026-08-15
+
+Fork release (`Fatoom333/Agent-Reach`). The skill no longer selects itself.
+
+本版本为分叉版本，skill 不再自动激活。
+
+### ⚠️ Behaviour Changes / 行为变更
+
+- **Skill is manual-invoke only.** The `description` in `SKILL.md` /
+  `SKILL_en.md` used to say "MUST USE" for any link, platform name or research
+  request, which made agents load it on almost every turn. It now forbids
+  self-activation: the skill runs on `/agent-reach` or a direct "use
+  agent-reach" request, and nothing else — not URLs, not platform names, not
+  search intent, not file reads.
+  skill 只在用户显式点名（`/agent-reach` 或「使用 agent-reach」）时使用，
+  不再因为链接、平台名称、搜索需求或读取文件而自动激活。
+- **No autonomous network calls.** Standing rule 5 (run `agent-reach
+  check-update` on your own after a task) is gone from both skill files.
+  Version checks are the user's call.
+  删除常驻规则 5（任务后自动运行 `agent-reach check-update`）。
+- **`agent-reach skill --install` writes `~/.claude/skills/` only.** Other
+  agent clients (`~/.agents`, `~/.config/opencode`, `~/.openclaw`) used to be
+  written whenever the directory existed; they now require an explicit
+  `--skill-dir DIR` or `--all-clients`. `--uninstall` mirrors this and reports
+  copies left in other roots instead of deleting them silently.
+  安装默认只写 `~/.claude/skills/`，其他客户端目录需显式指定。
+
+### 🆕 New / 新增
+
+- `.claude/commands/agent-reach.md` — slash command that explicitly loads the
+  skill and runs the request through it.
+- `agent-reach skill --install/--uninstall` accept `--skill-dir DIR`
+  (repeatable) and `--all-clients`.
+
+### 🔧 Maintenance / 维护
+
+- Install and update paths (docs, CLI output, `check-update`/`watch` API
+  endpoints, MCP install hint) point at this fork. Updating from upstream
+  would restore the auto-triggering skill description.
+  安装与更新路径全部指向本分叉仓库。
+- `docs/update.md` no longer claims that `doctor` installs skill files — it
+  never did in this code path.
+- Tests cover the new install/uninstall contract, the manual-only
+  descriptions, and that no code-fetching line points upstream.
+
+---
+
 ## [1.3.1] - 2026-03-27
 
 ### 🐛 Bug Fixes / 修复
