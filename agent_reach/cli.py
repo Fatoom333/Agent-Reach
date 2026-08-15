@@ -146,6 +146,12 @@ def main():
                                help="Install SKILL.md to agent skill directories")
     p_skill_group.add_argument("--uninstall", action="store_true",
                                help="Remove SKILL.md from agent skill directories")
+    p_skill.add_argument("--skill-dir", action="append", metavar="DIR",
+                         help="Use this skill root instead of the default "
+                              "~/.claude/skills (repeatable)")
+    p_skill.add_argument("--all-clients", action="store_true",
+                         help="Apply to every known agent client root "
+                              "(~/.claude, ~/.agents, ~/.config/opencode, ~/.openclaw)")
 
     # ── format ──
     p_format = sub.add_parser("format", help="Clean and format platform API output")
@@ -466,8 +472,64 @@ def _cmd_install(args):
         print("Dry run complete. No changes were made.")
 
 
-def _install_skill(force: bool = True):
-    """Install Agent Reach as an agent skill for supported agent clients."""
+# Claude Code's skill root is the only directory written by default. Every
+# other agent client is opt-in: the caller has to name it explicitly.
+DEFAULT_SKILL_ROOT = ("~/.claude/skills", "Claude Code")
+
+KNOWN_SKILL_ROOTS = (
+    ("~/.claude/skills", "Claude Code"),
+    ("~/.agents/skills", "Agent"),
+    ("~/.config/opencode/skills", "OpenCode"),
+    ("~/.openclaw/skills", "OpenClaw"),
+)
+
+
+def _skill_root_label(path: str) -> str:
+    """Name a skill root for console output ('custom' when unknown)."""
+    expanded = os.path.normpath(os.path.expanduser(path))
+    for known_root, label in KNOWN_SKILL_ROOTS:
+        if os.path.normpath(os.path.expanduser(known_root)) == expanded:
+            return label
+    return "custom"
+
+
+def _resolve_skill_roots(skill_dirs=None, all_clients: bool = False):
+    """Return the [(skill root, label)] pairs an install/uninstall may touch.
+
+    Without an explicit argument this is Claude Code's skill root alone.
+    ``skill_dirs`` names roots directly; ``all_clients`` opts into every known
+    agent client (plus ``OPENCLAW_HOME`` when set).
+    """
+    if skill_dirs:
+        roots = [(path, _skill_root_label(path)) for path in skill_dirs]
+    elif all_clients:
+        roots = list(KNOWN_SKILL_ROOTS)
+        openclaw_home = os.environ.get("OPENCLAW_HOME")
+        if openclaw_home:
+            roots.insert(
+                0,
+                (os.path.join(openclaw_home, ".openclaw", "skills"), "OpenClaw"),
+            )
+    else:
+        roots = [DEFAULT_SKILL_ROOT]
+
+    resolved = []
+    seen = set()
+    for path, label in roots:
+        expanded = os.path.expanduser(path)
+        key = os.path.normpath(expanded)
+        if key not in seen:
+            seen.add(key)
+            resolved.append((expanded, label))
+    return resolved
+
+
+def _install_skill(force: bool = True, skill_dirs=None, all_clients: bool = False):
+    """Install Agent Reach as an agent skill.
+
+    Only Claude Code's skill root is written by default; other agent clients
+    are never touched unless the caller passes ``skill_dirs``/``all_clients``.
+    """
     import importlib.resources
     import os
     import shutil
@@ -538,76 +600,49 @@ def _install_skill(force: bool = True):
             print(f"  Warning: Could not install skill: {e}")
             return None
 
-    # Install into every known skill root that already exists.
-    skill_dirs = [
-        (os.path.expanduser("~/.agents/skills"), "Agent"),
-        (os.path.expanduser("~/.config/opencode/skills"), "OpenCode"),
-        (os.path.expanduser("~/.openclaw/skills"), "OpenClaw"),
-        (os.path.expanduser("~/.claude/skills"), "Claude Code"),
-    ]
-
-    # Insert OPENCLAW_HOME path at the beginning if environment variable is set
-    openclaw_home = os.environ.get("OPENCLAW_HOME")
-    if openclaw_home:
-        skill_dirs.insert(
-            0,
-            (os.path.join(openclaw_home, ".openclaw", "skills"), "OpenClaw"),
-        )
+    targets = _resolve_skill_roots(skill_dirs, all_clients)
+    # A named root is created on demand; the opt-in sweep across every known
+    # client only refreshes roots that the user already has.
+    sweep = all_clients and not skill_dirs
 
     installed = False
-    for skill_dir, platform_name in skill_dirs:
-        if os.path.isdir(skill_dir):
-            target = os.path.join(skill_dir, "agent-reach")
-            status = _copy_skill_dir(target)
-            if status:
-                if status == "preserved":
-                    print(f"Skill already installed for {platform_name}, preserving existing files: {target}")
-                else:
-                    print(f"Skill installed for {platform_name}: {target}")
-                installed = True
+    for skill_dir, platform_name in targets:
+        if sweep and not os.path.isdir(skill_dir):
+            continue
+        target = os.path.join(skill_dir, "agent-reach")
+        status = _copy_skill_dir(target)
+        if status:
+            if status == "preserved":
+                print(f"Skill already installed for {platform_name}, preserving existing files: {target}")
+            else:
+                print(f"Skill installed for {platform_name}: {target}")
+            installed = True
 
     if not installed:
-        # No known skill directory found — create for .agents by default
-        target = os.path.expanduser("~/.agents/skills/agent-reach")
-        os.makedirs(os.path.dirname(target), exist_ok=True)
-        status = _copy_skill_dir(target)
-        if status == "preserved":
-            print(f"Skill already installed, preserving existing files: {target}")
-        elif status == "installed":
-            print(f"Skill installed: {target}")
-            installed = True
-        else:
-            print("  -- Could not install agent skill (optional)")
-            print(
-                "  -- Tip: install OpenCode, OpenClaw, Claude Code, "
-                "or create ~/.agents/skills/ manually"
-            )
+        print("  -- Could not install agent skill (optional)")
+        print(
+            "  -- Tip: pass --skill-dir DIR (or --all-clients) if your agent "
+            "reads skills from somewhere other than ~/.claude/skills/"
+        )
     return installed
 
 
-def _uninstall_skill():
-    """Remove SKILL.md from all known agent skill directories."""
+def _uninstall_skill(skill_dirs=None, all_clients: bool = False):
+    """Remove the installed skill from the same roots ``_install_skill`` writes.
+
+    Claude Code's root by default; other agent clients only when named through
+    ``skill_dirs``/``all_clients``. Copies left in roots that were not asked
+    for are reported, never deleted behind the user's back.
+    """
     import shutil
 
-    skill_dirs = [
-        ("~/.config/opencode/skills/agent-reach", "OpenCode"),
-        ("~/.openclaw/skills/agent-reach", "OpenClaw"),
-        ("~/.claude/skills/agent-reach", "Claude Code"),
-        ("~/.agents/skills/agent-reach", "Agent"),
-    ]
-
-    # Also check OPENCLAW_HOME
-    openclaw_home = os.environ.get("OPENCLAW_HOME")
-    if openclaw_home:
-        skill_dirs.insert(
-            0,
-            (os.path.join(openclaw_home, ".openclaw", "skills", "agent-reach"), "OpenClaw"),
-        )
+    targets = _resolve_skill_roots(skill_dirs, all_clients)
+    handled = {os.path.normpath(skill_dir) for skill_dir, _ in targets}
 
     removed = False
-    for skill_path_template, platform_name in skill_dirs:
-        skill_path = os.path.expanduser(skill_path_template)
-        if os.path.isdir(skill_path):
+    for skill_dir, platform_name in targets:
+        skill_path = os.path.join(skill_dir, "agent-reach")
+        if os.path.isdir(skill_path) or os.path.islink(skill_path):
             try:
                 if os.path.islink(skill_path):
                     os.unlink(skill_path)
@@ -618,17 +653,33 @@ def _uninstall_skill():
             except Exception as e:
                 print(f"  Could not remove {skill_path}: {e}")
 
+    leftovers = []
+    for known_root, platform_name in KNOWN_SKILL_ROOTS:
+        skill_dir = os.path.expanduser(known_root)
+        if os.path.normpath(skill_dir) in handled:
+            continue
+        skill_path = os.path.join(skill_dir, "agent-reach")
+        if os.path.isdir(skill_path) or os.path.islink(skill_path):
+            leftovers.append(f"{platform_name}: {skill_path}")
+
+    if leftovers:
+        print("  Skill copies left in other agent clients (use --all-clients to remove):")
+        for leftover in leftovers:
+            print(f"      {leftover}")
+
     if not removed:
         print("  No skill installations found.")
 
 
 def _cmd_skill(args):
     """Manage agent skill registration."""
+    skill_dirs = getattr(args, "skill_dir", None)
+    all_clients = getattr(args, "all_clients", False)
     if args.install:
-        if not _install_skill():
+        if not _install_skill(skill_dirs=skill_dirs, all_clients=all_clients):
             raise SystemExit(1)
     elif args.uninstall:
-        _uninstall_skill()
+        _uninstall_skill(skill_dirs=skill_dirs, all_clients=all_clients)
 
 
 def _cmd_format(args):
@@ -2190,13 +2241,24 @@ def _github_get_with_retry(url, timeout=10, retries=3, sleeper=time.sleep):
     return None, "unknown", retries
 
 
+#: This build updates from the fork, not from upstream: upstream ships a skill
+#: description that makes agents load the skill automatically, and pulling it
+#: back in would silently undo the manual-invoke-only behaviour.
+UPDATE_REPO = "Fatoom333/Agent-Reach"
+UPDATE_GUIDE_URL = (
+    f"https://raw.githubusercontent.com/{UPDATE_REPO}/main/docs/update.md"
+)
+UPDATE_ARCHIVE_URL = f"https://github.com/{UPDATE_REPO}/archive/main.zip"
+UPDATE_RELEASE_API = f"https://api.github.com/repos/{UPDATE_REPO}/releases/latest"
+UPDATE_COMMIT_API = f"https://api.github.com/repos/{UPDATE_REPO}/commits/main"
+
 #: Full update = package + upstream tools + skill. The one-liner walks an
 #: agent through all three (docs/update.md); bare pip only updates the package.
 _UPDATE_INSTRUCTIONS = (
     "更新方式（推荐，复制这句话给你的 AI Agent，会完整更新本体+上游工具+skill）：\n"
-    "  帮我更新 Agent Reach：https://raw.githubusercontent.com/Panniantong/agent-reach/main/docs/update.md\n"
+    f"  帮我更新 Agent Reach：{UPDATE_GUIDE_URL}\n"
     "仅更新本体（不含上游工具和 skill）：\n"
-    "  pip install --upgrade https://github.com/Panniantong/agent-reach/archive/main.zip"
+    f"  pip install --upgrade {UPDATE_ARCHIVE_URL}"
 )
 
 
@@ -2224,8 +2286,8 @@ def _cmd_check_update():
     from agent_reach import __version__
 
     print(f"当前版本: v{__version__}")
-    release_url = "https://api.github.com/repos/Panniantong/Agent-Reach/releases/latest"
-    commit_url = "https://api.github.com/repos/Panniantong/Agent-Reach/commits/main"
+    release_url = UPDATE_RELEASE_API
+    commit_url = UPDATE_COMMIT_API
 
     # Fetch latest release with retry/backoff.
     resp, err, attempts = _github_get_with_retry(release_url, timeout=10, retries=3)
@@ -2310,7 +2372,7 @@ def _cmd_watch():
     new_version = ""
     release_body = ""
     resp, err, _attempts = _github_get_with_retry(
-        "https://api.github.com/repos/Panniantong/Agent-Reach/releases/latest",
+        UPDATE_RELEASE_API,
         timeout=10,
         retries=2,
     )
@@ -2343,7 +2405,7 @@ def _cmd_watch():
             for line in release_body.strip().split("\n")[:10]:
                 print(f"    {line}")
         print("  更新（一句话发给 Agent 即可完整更新）：")
-        print("    帮我更新 Agent Reach：https://raw.githubusercontent.com/Panniantong/agent-reach/main/docs/update.md")
+        print(f"    帮我更新 Agent Reach：{UPDATE_GUIDE_URL}")
 
 
 if __name__ == "__main__":
